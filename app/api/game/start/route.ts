@@ -33,6 +33,7 @@ export async function POST(request: NextRequest) {
         status: 'playing',
         currentRound: 1,
         currentItemId: item.id,
+        roundStartTime: new Date(),
         updatedAt: new Date(),
       },
     });

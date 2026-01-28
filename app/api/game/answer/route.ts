@@ -29,21 +29,35 @@ export async function POST(request: NextRequest) {
           lastAnsweredItemId: room.currentItemId,
           updatedAt: new Date()
         },
-        $inc: { score: isCorrect ? 10 : -5 }
+        $inc: { score: isCorrect ? 10 : 0 }
       }
     );
 
     // Get current state
     const allPlayers = await db.collection('players').find({ roomId }).toArray();
-    // In this mode, everyone stays "alive" until the end
-    const alivePlayers = allPlayers;
 
-    // Check if ALL players have answered the current item
-    const currentItemAnsweredCount = allPlayers.filter(p =>
+    // Filter for active players (heartbeat within last 10 seconds)
+    const now = new Date();
+    const activeThreshold = new Date(now.getTime() - 10000);
+
+    // Players are active if they have a recent lastActive timestamp
+    // If lastActive is missing, we consider them inactive (handling dropped players)
+    const activePlayers = allPlayers.filter(p =>
+      p.lastActive && new Date(p.lastActive) > activeThreshold
+    );
+
+    // If no active players detected (rare race condition or all left), fall back to all players
+    // to avoid stuck state, or just wait. 
+    // Better: if valid active players exist, use them. Else, maybe game is paused?
+    // Let's stick effectively to: Only wait for players who are actually there.
+    const playersToWaitFor = activePlayers.length > 0 ? activePlayers : allPlayers;
+
+    // Check if ALL active players have answered the current item
+    const currentItemAnsweredCount = playersToWaitFor.filter(p =>
       p.lastAnsweredItemId === room.currentItemId
     ).length;
 
-    if (currentItemAnsweredCount === allPlayers.length) {
+    if (currentItemAnsweredCount >= playersToWaitFor.length) {
       // Check if we reached the round limit (10 rounds)
       if (room.currentRound >= 10) {
         await db.collection('rooms').updateOne({ roomId }, {
@@ -64,6 +78,7 @@ export async function POST(request: NextRequest) {
         $set: {
           currentItemId: nextItem.id,
           currentRound: (room.currentRound || 0) + 1,
+          roundStartTime: new Date(),
           updatedAt: new Date()
         }
       });

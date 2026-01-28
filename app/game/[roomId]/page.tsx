@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useAuth } from '@/app/context/AuthContext';
 import { GAME_ITEMS } from '@/lib/gameData';
@@ -45,6 +45,10 @@ export default function GamePage() {
   const [hasAnswered, setHasAnswered] = useState(false);
   const [winner, setWinner] = useState<Player | null>(null);
 
+  // Track the last round we fully processed to detect changes
+  const lastRoundProcessed = useRef<number>(0);
+  const lastItemProcessed = useRef<string | null>(null);
+
   const roomId = params.roomId as string;
   const currentItem = room?.currentItemId ? GAME_ITEMS.find(i => i.id === room.currentItemId) : null;
   const currentPlayer = players.find(p => p.playerId === playerId);
@@ -52,9 +56,10 @@ export default function GamePage() {
 
   // Fetch room and players data
   // Fetch room and players data
+  // Fetch room and players data
   const fetchData = async () => {
     try {
-      const response = await fetch(`/api/rooms/get?roomId=${roomId}`);
+      const response = await fetch(`/api/rooms/get?roomId=${roomId}&playerId=${playerId || ''}`);
       if (!response.ok) throw new Error('Failed to fetch room');
       const data = await response.json();
       setRoom(data.room);
@@ -73,11 +78,41 @@ export default function GamePage() {
     }
   };
 
+  // Poll for updates
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 500);
+    const interval = setInterval(fetchData, 500); // Polling every 500ms
     return () => clearInterval(interval);
   }, [roomId]);
+
+  // React to room changes to update game state
+  // This avoids stale closures in the polling interval
+  useEffect(() => {
+    if (!room || room.status !== 'playing') return;
+
+    const serverRound = room.currentRound;
+    const serverItem = room.currentItemId;
+
+    // Check if this is a "new" state compared to what we last processed
+    const isNewRound = serverRound > lastRoundProcessed.current;
+    const isNewItem = serverItem !== lastItemProcessed.current;
+
+    if (isNewRound || isNewItem) {
+      // We only transition to 'showing' if we aren't in initial countdown
+      // If we are in 'countdown', let that finish naturally
+      // If we are in 'finished', stay finished
+
+      if (gameState !== 'countdown' && gameState !== 'finished') {
+        setGameState('showing');
+        setHasAnswered(false);
+        setTimerKey(prev => prev + 1); // Reset timer
+      }
+
+      // Update refs
+      lastRoundProcessed.current = serverRound;
+      lastItemProcessed.current = serverItem || null;
+    }
+  }, [room, gameState]);
 
   // Handle countdown
   useEffect(() => {
@@ -87,6 +122,12 @@ export default function GamePage() {
       setGameState('showing');
       setHasAnswered(false);
       setTimerKey(prev => prev + 1);
+
+      // Sync refs when countdown finishes so we don't double-trigger
+      if (room) {
+        lastRoundProcessed.current = room.currentRound;
+        lastItemProcessed.current = room.currentItemId || null;
+      }
     }, COUNTDOWN_DURATION);
 
     return () => clearTimeout(timer);
@@ -114,11 +155,9 @@ export default function GamePage() {
           setWinner(data.winner);
           setGameState('finished');
         } else {
-          setTimeout(() => {
-            setGameState('showing');
-            setHasAnswered(false);
-            setTimerKey(prev => prev + 1);
-          }, 1000);
+          // Do NOT wait 1s. Just wait for server to update round via polling
+          // But trigger a fetch immediately in case we are the last one
+          await fetchData();
         }
       } catch (err) {
         console.error('Failed to submit timeout:', err);
@@ -149,12 +188,8 @@ export default function GamePage() {
         setWinner(data.winner);
         setGameState('finished');
       } else {
-        // Wait a bit before showing next item
-        setTimeout(() => {
-          setGameState('showing');
-          setHasAnswered(false);
-          setTimerKey(prev => prev + 1);
-        }, 1000);
+        // IMMEDIATE fetch to see if round advanced (if we were last player)
+        await fetchData();
       }
     } catch (err) {
       console.error('Failed to submit answer:', err);
@@ -231,10 +266,10 @@ export default function GamePage() {
 
                 <div className="py-4">
                   <p className="text-4xl font-extrabold text-gray-900">
-                    {players.sort((a, b) => a.score - b.score)[0].name}
+                    {[...players].sort((a, b) => a.score - b.score)[0].name}
                   </p>
                   <p className="text-lg text-red-500 font-medium">
-                    (Only {players.sort((a, b) => a.score - b.score)[0].score} points? 😂)
+                    (Only {[...players].sort((a, b) => a.score - b.score)[0].score} points? 😂)
                   </p>
                 </div>
 
@@ -252,7 +287,7 @@ export default function GamePage() {
             <div className="bg-gray-50 p-4 rounded-lg">
               <h3 className="font-semibold mb-2">Final Leaderboard</h3>
               <div className="space-y-2">
-                {players
+                {[...players]
                   .sort((a, b) => b.score - a.score)
                   .map((p, idx) => (
                     <div
